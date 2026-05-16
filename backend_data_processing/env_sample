@@ -1,0 +1,26 @@
+# DEFINE DB ENGINE
+# Set it as postgresql for PostGres
+# Set it as sqlite3 for SQLite3
+DATABASE_ENGINE=postgresql
+
+# DATABASE POSTGRES
+# If not using Postgres, leave these variables blank
+DATABASE_DEFAULT_NAME=resp_db
+DATABASE_DEFAULT_HOST=dataprocessing_db
+DATABASE_DEFAULT_USER=dataprocessing_user
+DATABASE_DEFAULT_PASSWORD=dataprocessing_password
+
+# WEB APP BACKEND
+BACKEND_URL=
+BACKEND_AUTH_KEY=
+BACKEND_SERVER_TO_SERVER_KEY=
+BACKEND_SERVER_TO_SERVER_VALUE=
+
+# REDIS Settings
+# REDIS_HOST=dataprocessing_redis  # Docker deployment
+REDIS_HOST=localhost # local deployment
+REDIS_PORT=6379
+
+# Others
+DEBUG=1 # set to 1 in non-production and set to 0 in production
+MAKE_TIMEZONE_AWARE=1

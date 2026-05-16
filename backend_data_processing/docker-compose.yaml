@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+
+  dataprocessing_web:
+    container_name: dataprocessing_web
+    image: dataprocessing_web
+    build:
+      context: .
+    command: python manage.py runserver 0.0.0.0:9000
+    env_file:
+      - .env.dev
+    volumes:
+      - .:/app
+    ports:
+      - "9000:9000"
+    depends_on:
+      - dataprocessing_redis
+    networks:
+      - dataprocessing_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/api/v1/health_check"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  dataprocessing_redis:
+    container_name: dataprocessing_redis
+    image: redis:alpine
+    ports:
+      - "6381:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - dataprocessing_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  dataprocessing_celery:
+    container_name: dataprocessing_celery
+    image: dataprocessing_celery
+    restart: always
+    build:
+      context: .
+    command: celery -A dataprocessing.celery worker --loglevel=info
+    volumes:
+      - .:/app
+    depends_on:
+      - dataprocessing_redis
+    networks:
+      - dataprocessing_network
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A dataprocessing inspect ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  dataprocessing_beat:
+    container_name: dataprocessing_beat
+    image: dataprocessing_beat
+    restart: always
+    build:
+      context: .
+    command: celery -A dataprocessing.celery beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - .:/app
+    depends_on:
+      - dataprocessing_redis
+      - dataprocessing_celery
+    networks:
+      - dataprocessing_network
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A dataprocessing inspect ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  dataprocessing_flower:
+    container_name: dataprocessing_flower
+    image: dataprocessing_flower
+    build: 
+      context: .
+    command: ["/app/wait-for-celery.sh"]
+    depends_on:
+      - dataprocessing_celery
+      - dataprocessing_redis
+    env_file:
+      - .env.dev
+    ports:
+      - "5557:5555"
+    networks:
+      - dataprocessing_network
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  redis_data:
+
+networks:
+  dataprocessing_network:
+    driver: bridge

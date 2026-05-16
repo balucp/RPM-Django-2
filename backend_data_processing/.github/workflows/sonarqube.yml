@@ -1,0 +1,146 @@
+# SonarQube Code Quality Analysis
+# Only works for Node.js and Python repositories!
+# To use in other repos: just change the branch name below (line 9)
+name: SonarQube Analysis
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, ready_for_review]
+    # This excludes draft PRs - only runs on:
+    # - opened: new non-draft PRs
+    # - synchronize: commits pushed to existing PRs
+    # - ready_for_review: draft PRs converted to ready
+
+jobs:
+  analyze:
+    name: Code Quality Analysis
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: |
+          # start sonarqube container (skips production safety checks for ci environment)
+          docker run -d --name sonarqube -p 9000:9000 -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true sonarqube:lts-community
+          
+          # install node.js and dependencies if package.json exists
+          curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          if [ -f "package.json" ]; then
+            npm ci
+          fi
+          
+          # install python dependencies if requirements.txt exists
+          python3 -m pip install --upgrade pip
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          fi
+          
+          # download and install sonarqube scanner cli
+          wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-7.1.0.4889-linux-x64.zip
+          unzip -q sonar-scanner-cli-7.1.0.4889-linux-x64.zip
+          echo "$(pwd)/sonar-scanner-7.1.0.4889-linux-x64/bin" >> $GITHUB_PATH
+
+      - name: Wait for SonarQube startup
+        run: |
+          echo "Waiting for SonarQube..."
+          for i in {1..30}; do
+            if curl -f http://localhost:9000/api/system/status 2>/dev/null | grep -q '"status":"UP"'; then
+              echo "SonarQube ready!"
+              break
+            fi
+            echo "Attempt $i/30..."
+            sleep 10
+          done
+
+      - name: Run code analysis
+        run: |
+          if [ -f "package.json" ]; then
+            echo "JavaScript/Node.js project detected"
+            SOURCES="src"
+          elif [ -f "requirements.txt" ] || [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
+            echo "Python project detected"
+            SOURCES="."
+          else
+            echo "Unknown project type, scanning all files"
+            SOURCES="."
+          fi
+          
+          sonar-scanner \
+            -Dsonar.projectKey=sonarqube-gh-actions-scan \
+            -Dsonar.projectName="SonarQube GitHub Actions Scan" \
+            -Dsonar.sources=$SOURCES \
+            -Dsonar.host.url=http://localhost:9000 \
+            -Dsonar.login=admin \
+            -Dsonar.password=admin
+
+      - name: Generate reports
+        run: |
+          echo "Generating reports..."
+          mkdir -p reports
+          
+          # wait for sonarqube to finish analyzing code
+          PROJECT_KEY="sonarqube-gh-actions-scan"
+          for i in {1..30}; do
+            total=$(curl -s -u admin:admin "http://localhost:9000/api/issues/search?componentKeys=${PROJECT_KEY}&pageSize=1" | jq -r '.total')
+            if [ "$total" != "null" ] && [ "$total" -gt 0 ]; then
+              echo "Analysis complete! Found $total issues"
+              break
+            fi
+            echo "Processing... ($i/30)"
+            sleep 10
+          done
+          
+          # create concise summary report with issue counts
+          echo "Creating summary report..."
+          measures=$(curl -s -u admin:admin "http://localhost:9000/api/measures/component?component=${PROJECT_KEY}&metricKeys=alert_status,bugs,vulnerabilities,security_hotspots,code_smells,coverage,duplicated_lines_density,ncloc,sqale_index")
+          echo "$measures" | jq . > reports/sonarqube-results.txt
+          
+          issues_summary=$(curl -s -u admin:admin "http://localhost:9000/api/issues/search?componentKeys=${PROJECT_KEY}&facets=types,severities")
+          echo "--- Issues Summary ---" >> reports/sonarqube-results.txt
+          echo "$issues_summary" | jq -r '.facets[] | "--- \(.property | ascii_upcase) ---", (.values[] | "  \(.val): \(.count)"), ""' >> reports/sonarqube-results.txt
+          
+          # create detailed report with all individual issues
+          echo "Creating detailed issues report..."
+          total_issues=$(echo "$issues_summary" | jq -r '.total')
+          all_issues="[]"
+          
+          for ((page=1; (page-1)*500 < total_issues; page++)); do
+            echo "Fetching page $page..."
+            batch=$(curl -s -u admin:admin "http://localhost:9000/api/issues/search?componentKeys=${PROJECT_KEY}&pageSize=500&p=$page")
+            batch_issues=$(echo "$batch" | jq '.issues')
+            all_issues=$(echo "$all_issues $batch_issues" | jq -s 'add')
+          done
+          
+          echo "$all_issues" | jq . > reports/sonarqube-all-issues.txt
+          
+          # fail build if any blocker, critical, or bug issues are found (quality gate)
+          blocker_count=$(echo "$issues_summary" | jq -r '.facets[] | select(.property=="severities") | .values[] | select(.val=="BLOCKER") | .count // 0')
+          critical_count=$(echo "$issues_summary" | jq -r '.facets[] | select(.property=="severities") | .values[] | select(.val=="CRITICAL") | .count // 0')
+          bugs_count=$(echo "$issues_summary" | jq -r '.facets[] | select(.property=="types") | .values[] | select(.val=="BUG") | .count // 0')
+          
+          if [ "$blocker_count" -gt 0 ] || [ "$critical_count" -gt 0 ] || [ "$bugs_count" -gt 0 ]; then
+            echo "Quality gate failed: $blocker_count blocker issues, $critical_count critical issues, and $bugs_count bugs found"
+            exit 1
+          fi
+          echo "Quality gate passed"
+
+      - name: Upload summary report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sonarqube-summary
+          path: reports/sonarqube-results.txt
+
+      - name: Upload detailed issues
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sonarqube-all-issues
+          path: reports/sonarqube-all-issues.txt
+
+
